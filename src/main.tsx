@@ -1,6 +1,7 @@
 import React, { useEffect, useMemo, useRef, useState } from 'react'
 import { createRoot } from 'react-dom/client'
 import './styles.css'
+import { dateLabels, effectiveStatus, localDate, validateDates, type Dates } from './eventDates'
 
 type Decision = 'yes' | 'maybe' | 'no'
 type EventStatus = 'open' | 'closed' | 'ended'
@@ -32,20 +33,20 @@ type Filters = {
   tag: string
   category: string
   decision: 'all' | Decision
-  status: 'all' | EventStatus
-  view: 'all' | 'starred' | 'urgent'
+  status: 'all' | ReturnType<typeof effectiveStatus>
+  view: 'all' | 'starred' | 'urgent' | 'starting'
 }
 
 const CSV_HEADERS = ['id', 'title', 'organizer', 'category', 'tags', 'description', 'source_url', 'registration_start', 'registration_deadline', 'event_start', 'event_end', 'location', 'eligibility', 'status', 'participation_decision', 'priority', 'notes', 'last_verified'] as const
 
 const decisionLabels: Record<Decision, string> = { yes: '确定参加', maybe: '不一定', no: '确定不参加' }
-const statusLabels: Record<EventStatus, string> = { open: '报名中', closed: '报名结束', ended: '已结束' }
+const statusLabels = { upcoming: '尚未开始', open: '报名中', closed: '报名结束', ended: '已结束', unknown: '时间待定' }
 
 const daysFromToday = (days: number) => {
   const date = new Date()
   date.setHours(0, 0, 0, 0)
   date.setDate(date.getDate() + days)
-  return date.toISOString().slice(0, 10)
+  return localDate(date)
 }
 
 const starterEvents: EventRecord[] = [
@@ -91,8 +92,7 @@ function normalizeRecord(values: Record<string, string>, rowIndex: number): { re
   if (!['yes', 'maybe', 'no'].includes(decision)) errors.push(`第 ${rowIndex} 行的 participation_decision 必须是 yes、maybe 或 no`)
   const status = (values.status || 'open') as EventStatus
   if (!['open', 'closed', 'ended'].includes(status)) errors.push(`第 ${rowIndex} 行的 status 无效`)
-  const dateFields = ['registration_start', 'registration_deadline', 'event_start', 'event_end', 'last_verified']
-  dateFields.forEach(field => { if (values[field] && !/^\d{4}-\d{2}-\d{2}$/.test(values[field])) errors.push(`第 ${rowIndex} 行的 ${field} 应为 YYYY-MM-DD`) })
+  errors.push(...validateDates(Object.fromEntries(Object.keys(dateLabels).map(key => [key, values[key] || ''])) as Dates).map(error => `第 ${rowIndex} 行：${error}`))
   const tags = (values.tags || '').split(';').map(tag => tag.trim()).filter(Boolean)
   if (new Set(tags).size !== tags.length) errors.push(`第 ${rowIndex} 行包含重复标签`)
   if (errors.length) return { errors }
@@ -107,7 +107,7 @@ function normalizeRecord(values: Record<string, string>, rowIndex: number): { re
 function formatDate(date: string) {
   if (!date) return '未设置'
   const parsed = new Date(`${date}T00:00:00`)
-  return Number.isNaN(parsed.getTime()) ? date : new Intl.DateTimeFormat('zh-CN', { month: 'long', day: 'numeric' }).format(parsed)
+  return Number.isNaN(parsed.getTime()) ? date : new Intl.DateTimeFormat('zh-CN', { year: 'numeric', month: 'short', day: 'numeric' }).format(parsed)
 }
 function daysLeft(date: string) {
   if (!date) return null
@@ -117,10 +117,18 @@ function daysLeft(date: string) {
 }
 function urgency(event: EventRecord) {
   const days = daysLeft(event.registration_deadline)
-  if (event.status === 'ended' || (days !== null && days < 0)) return 'overdue'
+  const status = effectiveStatus(event)
+  if (status === 'ended' || status === 'closed') return 'overdue'
+  if (status === 'upcoming') return 'upcoming'
+  if (status === 'unknown') return 'normal'
   if (days !== null && days <= 3) return 'danger'
   if (days !== null && days <= 7) return 'soon'
   return 'normal'
+}
+
+function startsSoon(event: EventRecord) {
+  const days = daysLeft(event.registration_start)
+  return effectiveStatus(event) === 'upcoming' && days !== null && days <= 7
 }
 
 function App() {
@@ -142,7 +150,8 @@ function App() {
 
   const stats = useMemo(() => ({
     total: events.length,
-    urgent: events.filter(event => ['danger', 'soon'].includes(urgency(event)) && event.status === 'open').length,
+    urgent: events.filter(event => ['danger', 'soon'].includes(urgency(event)) && effectiveStatus(event) === 'open').length,
+    starting: events.filter(startsSoon).length,
     yes: events.filter(event => event.participation_decision === 'yes').length,
     maybe: events.filter(event => event.participation_decision === 'maybe').length,
   }), [events])
@@ -153,11 +162,11 @@ function App() {
     const matchesTag = filters.tag === 'all' || event.tags.includes(filters.tag)
     const matchesCategory = filters.category === 'all' || event.category === filters.category
     const matchesDecision = filters.decision === 'all' || event.participation_decision === filters.decision
-    const matchesStatus = filters.status === 'all' || event.status === filters.status
-    const matchesView = filters.view === 'all' || (filters.view === 'starred' ? event.starred : ['danger', 'soon'].includes(urgency(event)))
+    const matchesStatus = filters.status === 'all' || effectiveStatus(event) === filters.status
+    const matchesView = filters.view === 'all' || (filters.view === 'starred' ? event.starred : filters.view === 'starting' ? startsSoon(event) : ['danger', 'soon'].includes(urgency(event)))
     return matchesQuery && matchesTag && matchesCategory && matchesDecision && matchesStatus && matchesView
   }).sort((a, b) => {
-    const da = daysLeft(a.registration_deadline) ?? 99999, db = daysLeft(b.registration_deadline) ?? 99999
+    const da = daysLeft(filters.view === 'starting' ? a.registration_start : a.registration_deadline) ?? 99999, db = daysLeft(filters.view === 'starting' ? b.registration_start : b.registration_deadline) ?? 99999
     return da - db
   }), [events, filters])
 
@@ -207,6 +216,7 @@ function App() {
         <button className={`nav-item ${filters.view === 'all' ? 'active' : ''}`} onClick={() => setFilters({ ...filters, view: 'all' })}><span>▦</span>全部活动 <em>{stats.total}</em></button>
         <button className={`nav-item ${filters.view === 'urgent' ? 'active' : ''}`} onClick={() => setFilters({ ...filters, view: 'urgent' })}><span>◷</span>即将截止 <em className="red-count">{stats.urgent}</em></button>
         <button className={`nav-item ${filters.view === 'starred' ? 'active' : ''}`} onClick={() => setFilters({ ...filters, view: 'starred' })}><span>☆</span>我的关注 <em>{events.filter(event => event.starred).length}</em></button>
+        <button className={`nav-item ${filters.view === 'starting' ? 'active' : ''}`} onClick={() => setFilters({ ...filters, view: 'starting' })}><span>◴</span>即将开始 <em>{stats.starting}</em></button>
       </nav>
       <div className="side-section"><div className="section-label">参加意向</div>
         {(['yes', 'maybe', 'no'] as Decision[]).map(decision => <button key={decision} className="side-filter" onClick={() => setFilters({ ...filters, decision })}><i className={`dot ${decision}`} />{decisionLabels[decision]}<em>{events.filter(event => event.participation_decision === decision).length}</em></button>)}
@@ -219,30 +229,61 @@ function App() {
 
     <main className="main-content">
       <header className="topbar"><div className="breadcrumbs">我的空间 <span>/</span> 活动总览</div><div className="top-actions"><span className="saved-state"><i /> 已自动保存</span><button className="avatar">我</button></div></header>
-      <section className="hero"><div><p className="eyebrow">SATURDAY · {new Intl.DateTimeFormat('zh-CN', { month: 'long', day: 'numeric' }).format(new Date())}</p><h1>把机会留在视线里<span>。</span></h1><p className="hero-copy">你有 <b>{stats.urgent} 个活动</b> 将在近期截止，先处理最重要的事。</p></div><div className="hero-orbit"><div className="orbit-dot one" /><div className="orbit-dot two" /><div className="orbit-dot three" /><div className="orbit-center">{stats.total}<small>活动</small></div></div></section>
-      <section className="stats-row"><StatCard label="全部活动" value={stats.total} detail="已收录" tone="blue" /><StatCard label="即将截止" value={stats.urgent} detail="7 天内需要关注" tone="orange" /><StatCard label="确定参加" value={stats.yes} detail="已列入计划" tone="purple" /><StatCard label="不一定" value={stats.maybe} detail="等待进一步了解" tone="yellow" /></section>
-      <div className="content-heading"><div><h2>{filters.view === 'urgent' ? '即将截止' : filters.view === 'starred' ? '我的关注' : '全部活动'} <span>{filteredEvents.length}</span></h2><p>按报名截止时间排列，先完成最紧急的决定</p></div><button className="primary-button" onClick={() => { const fresh: EventRecord = { ...starterEvents[0], id: `new-${Date.now()}`, title: '新活动', tags: [], description: '', source_url: '', registration_start: '', registration_deadline: '', event_start: '', event_end: '', location: '', eligibility: '', notes: '', last_verified: daysFromToday(0), participation_decision: 'maybe', status: 'open', starred: false }; setEvents([fresh, ...events]); setSelectedId(fresh.id) }}>＋ 新建活动</button></div>
-      <div className="filter-bar"><div className="search-box"><span>⌕</span><input value={filters.query} onChange={event => setFilters({ ...filters, query: event.target.value })} placeholder="搜索活动、主办方或标签" /></div><select value={filters.tag} onChange={event => setFilters({ ...filters, tag: event.target.value })}><option value="all">所有标签</option>{allTags.map(tag => <option key={tag} value={tag}>{tag}</option>)}</select><select value={filters.category} onChange={event => setFilters({ ...filters, category: event.target.value })}><option value="all">所有分类</option>{categories.map(category => <option key={category} value={category}>{category}</option>)}</select><select value={filters.decision} onChange={event => setFilters({ ...filters, decision: event.target.value as Filters['decision'] })}><option value="all">参加意向</option><option value="yes">确定参加</option><option value="maybe">不一定</option><option value="no">确定不参加</option></select><select value={filters.status} onChange={event => setFilters({ ...filters, status: event.target.value as Filters['status'] })}><option value="all">活动状态</option><option value="open">报名中</option><option value="closed">报名结束</option><option value="ended">已结束</option></select>{(filters.query || filters.tag !== 'all' || filters.category !== 'all' || filters.decision !== 'all' || filters.status !== 'all' || filters.view !== 'all') && <button className="clear-button" onClick={clearFilters}>清除筛选</button>}</div>
+      <section className="hero"><div><p className="eyebrow">SATURDAY · {new Intl.DateTimeFormat('zh-CN', { month: 'long', day: 'numeric' }).format(new Date())}</p><h1>把机会留在视线里<span>。</span></h1><p className="hero-copy">你有 <b>{stats.urgent} 个活动</b> 将在近期截止，<b>{stats.starting} 个活动</b>将在 7 天内开放报名。</p></div><div className="hero-orbit"><div className="orbit-dot one" /><div className="orbit-dot two" /><div className="orbit-dot three" /><div className="orbit-center">{stats.total}<small>活动</small></div></div></section>
+      <section className="stats-row"><StatCard label="全部活动" value={stats.total} detail="已收录" tone="blue" /><StatCard label="即将截止" value={stats.urgent} detail="7 天内需要关注" tone="orange" /><StatCard label="即将开始" value={stats.starting} detail="7 天内开放报名" tone="blue" /><StatCard label="确定参加" value={stats.yes} detail="已列入计划" tone="purple" /><StatCard label="不一定" value={stats.maybe} detail="等待进一步了解" tone="yellow" /></section>
+      <div className="content-heading"><div><h2>{filters.view === 'starting' ? '即将开始' : filters.view === 'urgent' ? '即将截止' : filters.view === 'starred' ? '我的关注' : '全部活动'} <span>{filteredEvents.length}</span></h2><p>{filters.view === 'starting' ? '按报名开始时间排列，提前准备报名材料' : '展示完整报名区间，按报名截止时间排列'}</p></div><button className="primary-button" onClick={() => { const fresh: EventRecord = { ...starterEvents[0], id: `new-${Date.now()}`, title: '新活动', tags: [], description: '', source_url: '', registration_start: '', registration_deadline: '', event_start: '', event_end: '', location: '', eligibility: '', notes: '', last_verified: daysFromToday(0), participation_decision: 'maybe', status: 'open', starred: false }; setEvents([fresh, ...events]); setSelectedId(fresh.id) }}>＋ 新建活动</button></div>
+      <div className="filter-bar"><div className="search-box"><span>⌕</span><input value={filters.query} onChange={event => setFilters({ ...filters, query: event.target.value })} placeholder="搜索活动、主办方或标签" /></div><select value={filters.tag} onChange={event => setFilters({ ...filters, tag: event.target.value })}><option value="all">所有标签</option>{allTags.map(tag => <option key={tag} value={tag}>{tag}</option>)}</select><select value={filters.category} onChange={event => setFilters({ ...filters, category: event.target.value })}><option value="all">所有分类</option>{categories.map(category => <option key={category} value={category}>{category}</option>)}</select><select value={filters.decision} onChange={event => setFilters({ ...filters, decision: event.target.value as Filters['decision'] })}><option value="all">参加意向</option><option value="yes">确定参加</option><option value="maybe">不一定</option><option value="no">确定不参加</option></select><select value={filters.status} onChange={event => setFilters({ ...filters, status: event.target.value as Filters['status'] })}><option value="all">活动状态</option><option value="upcoming">尚未开始</option><option value="unknown">时间待定</option><option value="open">报名中</option><option value="closed">报名结束</option><option value="ended">已结束</option></select>{(filters.query || filters.tag !== 'all' || filters.category !== 'all' || filters.decision !== 'all' || filters.status !== 'all' || filters.view !== 'all') && <button className="clear-button" onClick={clearFilters}>清除筛选</button>}</div>
       {importMessage && <div className="import-message">{importMessage}<button onClick={() => setImportMessage('')}>×</button></div>}
       {validationErrors.length > 0 && <div className="error-box"><strong>CSV 需要修正</strong>{validationErrors.slice(0, 5).map(error => <span key={error}>· {error}</span>)}{validationErrors.length > 5 && <span>· 还有 {validationErrors.length - 5} 个问题</span>}<button onClick={() => setValidationErrors([])}>×</button></div>}
       <section className="event-list">{filteredEvents.length ? filteredEvents.map(event => <EventCard key={event.id} event={event} onOpen={() => setSelectedId(event.id)} onDecision={decision => updateEvent(event.id, { participation_decision: decision })} onStar={() => updateEvent(event.id, { starred: !event.starred })} />) : <div className="empty-state"><div>⌁</div><h3>没有找到匹配的活动</h3><p>试试清除筛选条件，或者导入一份新的 CSV。</p><button className="secondary-button" onClick={clearFilters}>清除筛选</button></div>}</section>
     </main>
-    {selected && <DetailPanel event={selected} onClose={() => setSelectedId(null)} onUpdate={patch => updateEvent(selected.id, patch)} onDelete={() => { setEvents(events.filter(event => event.id !== selected.id)); setSelectedId(null) }} />}
+    {selected && <DetailPanel key={selected.id} event={selected} onClose={() => setSelectedId(null)} onUpdate={patch => updateEvent(selected.id, patch)} onDelete={() => { setEvents(events.filter(event => event.id !== selected.id)); setSelectedId(null) }} />}
   </div>
 }
 
 function StatCard({ label, value, detail, tone }: { label: string, value: number, detail: string, tone: string }) { return <div className={`stat-card ${tone}`}><div className="stat-icon">{tone === 'blue' ? '▦' : tone === 'orange' ? '◷' : tone === 'purple' ? '✓' : '…'}</div><div><span>{label}</span><strong>{value}</strong><small>{detail}</small></div></div> }
 
 function EventCard({ event, onOpen, onDecision, onStar }: { event: EventRecord, onOpen: () => void, onDecision: (decision: Decision) => void, onStar: () => void }) {
-  const left = daysLeft(event.registration_deadline), level = urgency(event)
-  return <article className={`event-card ${level}`}><div className="event-main" onClick={onOpen}><div className="event-topline"><span className={`category-label ${event.category.length > 5 ? 'long' : ''}`}>{event.category}</span>{event.priority === '高' && <span className="priority-label">高优先级</span>}<span className="verified">最近更新 {event.last_verified ? formatDate(event.last_verified) : '—'}</span></div><h3>{event.title}</h3><div className="event-meta"><span>⌖ {event.organizer || '未填写主办方'}</span><span>◫ {formatDate(event.event_start)}</span><span>⌘ {event.location || '地点待定'}</span></div><div className="tag-row">{event.tags.map(tag => <span className="tag" key={tag}># {tag}</span>)}</div></div><div className="event-side"><button className={`star-button ${event.starred ? 'starred' : ''}`} onClick={event => { event.stopPropagation(); onStar() }}>{event.starred ? '★' : '☆'}</button><div className={`deadline ${level}`}><small>{left !== null && left < 0 ? '已截止' : '报名截止'}</small><strong>{formatDate(event.registration_deadline)}</strong>{left !== null && left >= 0 && <span>还有 {left} 天</span>}</div><div className="decision-group">{(['yes', 'maybe', 'no'] as Decision[]).map(decision => <button key={decision} title={decisionLabels[decision]} className={event.participation_decision === decision ? `selected ${decision}` : ''} onClick={click => { click.stopPropagation(); onDecision(decision) }}>{decision === 'yes' ? '✓' : decision === 'maybe' ? '…' : '×'}</button>)}</div></div></article>
+  const level = urgency(event)
+  return <article className={`event-card ${level}`}><div className="event-main" onClick={onOpen}><div className="event-topline"><span className={`category-label ${event.category.length > 5 ? 'long' : ''}`}>{event.category}</span>{event.priority === '高' && <span className="priority-label">高优先级</span>}<span className="verified">最近更新 {event.last_verified ? formatDate(event.last_verified) : '—'}</span></div><h3>{event.title}</h3><div className="event-meta"><span>⌖ {event.organizer || '未填写主办方'}</span><span>◫ {formatDate(event.event_start)}</span><span>⌘ {event.location || '地点待定'}</span></div><RegistrationDates event={event} /><div className="tag-row">{event.tags.map(tag => <span className="tag" key={tag}># {tag}</span>)}</div></div><div className="event-side"><button className={`star-button ${event.starred ? 'starred' : ''}`} onClick={event => { event.stopPropagation(); onStar() }}>{event.starred ? '★' : '☆'}</button><button className="edit-dates-button" onClick={onOpen}>编辑日期</button><div className="decision-group">{(['yes', 'maybe', 'no'] as Decision[]).map(decision => <button key={decision} title={decisionLabels[decision]} className={event.participation_decision === decision ? `selected ${decision}` : ''} onClick={click => { click.stopPropagation(); onDecision(decision) }}>{decision === 'yes' ? '✓' : decision === 'maybe' ? '…' : '×'}</button>)}</div></div></article>
+}
+
+function RegistrationDates({ event }: { event: EventRecord }) {
+  const status = effectiveStatus(event)
+  const start = daysLeft(event.registration_start), end = daysLeft(event.registration_deadline)
+  return <div className="registration-dates">
+    <div className={`registration-status ${status}`}>{statusLabels[status]}</div>
+    <div className="registration-range">
+      <div><small>报名开始</small><strong>{formatDate(event.registration_start)}</strong><span>{status === 'upcoming' ? `还有 ${start} 天开始` : status === 'open' && start === 0 ? '今天开始报名' : event.registration_start ? '开放报名日期' : '开始日期待定'}</span></div>
+      <div><small>报名截止</small><strong>{formatDate(event.registration_deadline)}</strong><span>{status === 'open' && end !== null ? end === 0 ? '今天截止' : `还有 ${end} 天截止` : event.registration_deadline ? '报名结束日期' : '截止日期待定'}</span></div>
+    </div>
+  </div>
+}
+
+function DateEditor({ event, onUpdate }: { event: EventRecord, onUpdate: (patch: Partial<EventRecord>) => void }) {
+  const readDates = (): Dates => Object.fromEntries(Object.keys(dateLabels).map(key => [key, event[key as keyof Dates]])) as Dates
+  const [draft, setDraft] = useState<Dates>(readDates)
+  const [message, setMessage] = useState('')
+  const errors = validateDates(draft)
+  const dirty = (Object.keys(dateLabels) as (keyof Dates)[]).some(key => draft[key] !== event[key])
+  return <form className="date-editor" onSubmit={e => {
+    e.preventDefault()
+    if (errors.length) return
+    onUpdate(draft)
+    setMessage('日期已保存')
+  }}>
+    <h3>编辑时间安排</h3><p>日期精确到天，截止当天仍可报名；留空表示待定。</p>
+    <div className="date-fields">{(Object.keys(dateLabels) as (keyof Dates)[]).map(key => <label className="field-label" key={key}>{dateLabels[key]}<input type="date" value={draft[key]} onChange={e => { setDraft({ ...draft, [key]: e.target.value }); setMessage('') }} /></label>)}</div>
+    {errors.length > 0 && <div className="date-errors" role="alert">{errors.map(error => <div key={error}>{error}</div>)}</div>}
+    <div className="date-actions"><button className="primary-button" type="submit" disabled={!dirty || errors.length > 0}>保存日期</button><button className="secondary-button" type="button" disabled={!dirty} onClick={() => { setDraft(readDates()); setMessage('') }}>撤销修改</button><span role="status">{dirty ? '日期尚未保存' : message}</span></div>
+  </form>
 }
 
 function DetailPanel({ event, onClose, onUpdate, onDelete }: { event: EventRecord, onClose: () => void, onUpdate: (patch: Partial<EventRecord>) => void, onDelete: () => void }) {
   const [draftTags, setDraftTags] = useState(event.tags.join(';'))
   useEffect(() => setDraftTags(event.tags.join(';')), [event.id])
   const saveTags = () => onUpdate({ tags: Array.from(new Set(draftTags.split(';').map(tag => tag.trim()).filter(Boolean))) })
-  return <div className="drawer-backdrop" onClick={onClose}><aside className="detail-panel" onClick={event => event.stopPropagation()}><div className="detail-header"><div><span className="eyebrow">活动详情</span><h2>{event.title}</h2></div><button className="close-button" onClick={onClose}>×</button></div><div className="detail-scroll"><div className="detail-deadline"><div><small>报名截止</small><strong>{formatDate(event.registration_deadline)}</strong></div><span className={`deadline-pill ${urgency(event)}`}>{daysLeft(event.registration_deadline) !== null && (daysLeft(event.registration_deadline)! < 0 ? '已截止' : `还有 ${daysLeft(event.registration_deadline)} 天`)}</span></div><label className="field-label">参加意向<div className="decision-select">{(['yes', 'maybe', 'no'] as Decision[]).map(decision => <button key={decision} className={event.participation_decision === decision ? `selected ${decision}` : ''} onClick={() => onUpdate({ participation_decision: decision })}>{decisionLabels[decision]}</button>)}</div></label><label className="field-label">活动状态<select value={event.status} onChange={e => onUpdate({ status: e.target.value as EventStatus })}><option value="open">报名中</option><option value="closed">报名结束</option><option value="ended">已结束</option></select></label><div className="detail-grid"><Info label="主办方" value={event.organizer} /><Info label="活动日期" value={`${formatDate(event.event_start)}${event.event_end ? ` — ${formatDate(event.event_end)}` : ''}`} /><Info label="活动地点" value={event.location} /><Info label="适合人群" value={event.eligibility} /></div><label className="field-label">标签<span className="field-hint">使用分号分隔，例如：人工智能;校级</span><input value={draftTags} onChange={e => setDraftTags(e.target.value)} onBlur={saveTags} /></label><div className="detail-description"><span className="field-label">活动简介</span><p>{event.description || '暂无简介，可以在 CSV 中补充。'}</p></div><label className="field-label">我的备注<textarea value={event.notes} placeholder="记录报名材料、组队情况或你的下一步行动" onChange={e => onUpdate({ notes: e.target.value })} /></label>{event.source_url && <a className="source-link" href={event.source_url} target="_blank" rel="noreferrer">打开活动来源 ↗</a>}<div className="detail-footer"><button className="delete-button" onClick={onDelete}>删除活动</button><span>修改会自动保存到浏览器</span></div></div></aside></div>
+  return <div className="drawer-backdrop" onClick={onClose}><aside className="detail-panel" onClick={event => event.stopPropagation()}><div className="detail-header"><div><span className="eyebrow">活动详情</span><h2>{event.title}</h2></div><button className="close-button" onClick={onClose}>×</button></div><div className="detail-scroll"><RegistrationDates event={event} /><DateEditor event={event} onUpdate={onUpdate} /><label className="field-label">参加意向<div className="decision-select">{(['yes', 'maybe', 'no'] as Decision[]).map(decision => <button key={decision} className={event.participation_decision === decision ? `selected ${decision}` : ''} onClick={() => onUpdate({ participation_decision: decision })}>{decisionLabels[decision]}</button>)}</div></label><label className="field-label">状态设置<select value={event.status} onChange={e => onUpdate({ status: e.target.value as EventStatus })}><option value="open">按日期自动判断</option><option value="closed">手动标记报名结束</option><option value="ended">手动标记已结束</option></select><span className="field-hint">当前：{statusLabels[effectiveStatus(event)]}；手动结束优先于日期判断。</span></label><div className="detail-grid"><Info label="主办方" value={event.organizer} /><Info label="活动日期" value={`${formatDate(event.event_start)}${event.event_end ? ` — ${formatDate(event.event_end)}` : ''}`} /><Info label="活动地点" value={event.location} /><Info label="适合人群" value={event.eligibility} /></div><label className="field-label">标签<span className="field-hint">使用分号分隔，例如：人工智能;校级</span><input value={draftTags} onChange={e => setDraftTags(e.target.value)} onBlur={saveTags} /></label><div className="detail-description"><span className="field-label">活动简介</span><p>{event.description || '暂无简介，可以在 CSV 中补充。'}</p></div><label className="field-label">我的备注<textarea value={event.notes} placeholder="记录报名材料、组队情况或你的下一步行动" onChange={e => onUpdate({ notes: e.target.value })} /></label>{event.source_url && <a className="source-link" href={event.source_url} target="_blank" rel="noreferrer">打开活动来源 ↗</a>}<div className="detail-footer"><button className="delete-button" onClick={onDelete}>删除活动</button><span>日期请点击保存，其余修改自动保存</span></div></div></aside></div>
 }
 function Info({ label, value }: { label: string, value: string }) { return <div className="info-block"><span>{label}</span><strong>{value || '未填写'}</strong></div> }
 

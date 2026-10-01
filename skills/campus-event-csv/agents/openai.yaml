@@ -1,0 +1,4 @@
+interface:
+  display_name: "校园活动录入"
+  short_description: "补全并核验校园活动信息，支持单项和批量整理，经确认后生成网页导入 CSV"
+  default_prompt: "使用 $campus-event-csv 整理我要录入的活动，默认查询中南大学通知，展示来源并等我确认后生成 CSV。"
