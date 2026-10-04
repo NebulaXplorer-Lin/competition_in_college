@@ -1,6 +1,8 @@
 # 竞赛雷达：架构、文件与使用说明
 
-更新日期：2026-10-01。本文以当前源码为准。
+更新日期：2026-10-04。本文以当前源码为准。
+
+日常收集比赛、使用 Codex 订阅额度和生成 CSV，请看 [比赛收集工作流使用指南](docs/campus-event-workflow-guide.md)。
 
 项目目录：`D:\Study250711\coding_projects\campus_competetion`。
 
@@ -62,13 +64,14 @@ React 的 events 活动数组
 | FileReader、Blob | 浏览器 API | CSV 读取、下载 |
 | pnpm | 包管理与锁文件 | 安装依赖、运行命令 |
 
-CSV 解析和导出由项目自行实现，没有使用第三方 CSV 库。当前没有组件库、数据库 SDK 或自动化测试套件。
+网页 CSV 解析和导出由项目自行实现，没有使用第三方 CSV 库。配套 skill 使用 Python 标准库校验、生成 CSV；项目已有日期和 CSV 工具的自动化测试。当前没有组件库或数据库 SDK。
 
 ## 4. 文件介绍
 
 | 文件 / 目录 | 作用及维护方式 |
 | --- | --- |
 | `src/main.tsx` | 主要业务代码：类型、演示数据、CSV 工具、筛选、统计、列表和详情组件 |
+| `src/eventDates.ts` | 日期有效性、起止关系和显示状态推导 |
 | `src/styles.css` | 页面配色、布局、卡片、抽屉和移动端样式 |
 | `src/global.d.ts` | 声明 CSS 模块，让 TypeScript 接受样式导入 |
 | `index.html` | HTML 外壳，包含标题、root 挂载节点和入口脚本 |
@@ -80,6 +83,11 @@ CSV 解析和导出由项目自行实现，没有使用第三方 CSV 库。当�
 | `start.cmd` | 当前电脑的双击启动入口 |
 | `.gitignore` | 排除依赖、构建产物、日志等文件 |
 | `README.md` | 本文档 |
+| `docs/campus-event-workflow-guide.md` | 比赛收集、确认、订阅额度和 CSV 工具的使用指南 |
+| `.codex/agents/event_researcher.toml` | 项目轻量检索子代理配置：gpt-6-luna、low |
+| `skills/campus-event-csv/` | 活动录入 skill、检索规则、结果 schema、CSV 字段约定及工具 |
+| `tests/` | 日期逻辑和 CSV 工具的边界测试 |
+| `outputs/` | 本地研究和生成文件，不提交到 Git |
 | `node_modules/` | 有效依赖目录，由 pnpm 安装，不手工修改 |
 | `dist/` | 生产构建产物，不手改，重新构建生成 |
 | `*.tsbuildinfo` | TypeScript 增量构建缓存 |
@@ -254,6 +262,12 @@ id,title,organizer,category,tags,description,source_url,registration_start,regis
 
 项目内 `skills/campus-event-csv/` 是随项目保存的副本；个人安装目录为 `~/.codex/skills/campus-event-csv/`。两份文件不会自动同步，后续修改时需同步更新。
 
+已配置订阅额度工作流：短且完整的通知直接处理，需要检索时使用一个 `gpt-6-luna`、`low` 的子代理；具体规则见 [检索工作流](skills/campus-event-csv/references/research-workflow.md)，项目级配置在 `.codex/agents/event_researcher.toml`。不指定模型的子代理会继承主代理，必须核对实际创建参数；指定模型不可用时报告限制，不自动换更贵模型或接入付费 API。子代理仍消耗当前账户额度，检索次数限制属于流程约束，不能当作账单硬限额。
+
+完整操作步骤、可复制的请求、首次与合并清单的区别、手动工具命令和排错方法见 [比赛收集工作流使用指南](docs/campus-event-workflow-guide.md)。日常使用只需提供材料、核对预览并确认；JSON 和 Python 命令可以交给 Codex 完成。
+
+字段提取使用 [中间结果 schema](skills/campus-event-csv/references/research-result.schema.json)，保留关键原文、来源和缺失项。确认后可用 `python skills/campus-event-csv/scripts/csv_tools.py generate --input 已确认记录.json --baseline 用户完整导出.csv --output 新的合并清单.csv` 生成完整合并文件；首次或仅新增时省略 baseline。用 `python skills/campus-event-csv/scripts/csv_tools.py validate 新的合并清单.csv` 独立校验。工具只依赖 Python 标准库，不覆盖已有输出，不删除旧记录，更新只修改明确列出的字段；`confirmed=true` 不能替代实际预览确认。
+
 未使用 skill 时，也可以把导出的完整清单与新通知交给外部 AI，使用下面的提示词：
 
 ```text
@@ -296,3 +310,5 @@ id,title,organizer,category,tags,description,source_url,registration_start,regis
 后续可以优先完善完整活动表单、导入预览与合并模式、包含收藏的完整备份。
 
 已通过 pnpm build（TypeScript 检查和 Vite 构建）。日期逻辑测试使用 Node.js 24 执行 `node --test tests/eventDates.test.ts`，覆盖日期边界、手动状态优先级、缺失日期和无效日期。浏览器已验证日期顺序错误提示、保存、刷新保留以及即将开始筛选；临时测试活动已清理。
+
+CSV 工具使用 `python -m unittest discover -s tests -p "test_campus_csv_tools.py" -v` 验证，当前 8 项测试覆盖合并保留、确认关口、重复与枚举、日期、UTF-8 BOM、转义回读、稳定 ID、文件不覆盖及命令入口。skill 和研究 schema 已校验，并用 gpt-6-luna、low 完成离线样例提取；尚未测量真实检索的额度节省比例。
