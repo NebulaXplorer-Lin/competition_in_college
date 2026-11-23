@@ -1,5 +1,6 @@
 import React, { useEffect, useMemo, useRef, useState } from 'react'
 import { createRoot } from 'react-dom/client'
+import sharedInitialCSV from '../data/csu-competitions-2026.csv?raw'
 import './styles.css'
 import { dateLabels, effectiveStatus, localDate, validateDates, type Dates } from './eventDates'
 
@@ -60,21 +61,39 @@ const starterEvents: EventRecord[] = [
 
 function parseCSV(text: string): string[][] {
   const rows: string[][] = []
-  let row: string[] = [], cell = '', quoted = false
+  let row: string[] = [], cell = '', quoted = false, afterQuote = false
   for (let i = 0; i < text.length; i++) {
     const char = text[i]
     const next = text[i + 1]
     if (char === '"') {
-      if (quoted && next === '"') { cell += '"'; i++ } else quoted = !quoted
-    } else if (char === ',' && !quoted) { row.push(cell); cell = '' }
+      if (quoted && next === '"') { cell += '"'; i++ }
+      else if (quoted) { quoted = false; afterQuote = true }
+      else if (!cell && !afterQuote) quoted = true
+      else throw new Error('CSV 引号格式错误')
+    } else if (char === ',' && !quoted) { row.push(cell); cell = ''; afterQuote = false }
     else if ((char === '\n' || char === '\r') && !quoted) {
       if (char === '\r' && next === '\n') i++
       row.push(cell); if (row.some(value => value.trim())) rows.push(row)
-      row = []; cell = ''
-    } else cell += char
+      row = []; cell = ''; afterQuote = false
+    } else if (afterQuote) throw new Error('CSV 引号后应为逗号或换行')
+    else cell += char
   }
-  if (cell || row.length) { row.push(cell); if (row.some(value => value.trim())) rows.push(row) }
+  if (quoted) throw new Error('CSV 有未闭合的引号')
+  if (cell || row.length || afterQuote) { row.push(cell); if (row.some(value => value.trim())) rows.push(row) }
   return rows
+}
+
+function isHttpUrl(value: string) {
+  if (!/^https?:\/\//i.test(value) || /\s/.test(value)) return false
+  try { return Boolean(new URL(value).hostname) } catch { return false }
+}
+
+function eventSources(event: EventRecord) {
+  const urls = [event.source_url, ...event.notes.split(/\r?\n/).flatMap(line => {
+    const match = line.match(/^(?:补充来源\d*|同一官方来源[^：]*|主来源[^：]*)[：:]\s*(\S+)\s*$/)
+    return match ? [match[1]] : []
+  })]
+  return [...new Set(urls.filter(isHttpUrl))]
 }
 
 function csvCell(value: string) { return /[",\n\r]/.test(value) ? `"${value.replaceAll('"', '""')}"` : value }
@@ -92,6 +111,7 @@ function normalizeRecord(values: Record<string, string>, rowIndex: number): { re
   if (!['yes', 'maybe', 'no'].includes(decision)) errors.push(`第 ${rowIndex} 行的 participation_decision 必须是 yes、maybe 或 no`)
   const status = (values.status || 'open') as EventStatus
   if (!['open', 'closed', 'ended'].includes(status)) errors.push(`第 ${rowIndex} 行的 status 无效`)
+  if (values.source_url && !isHttpUrl(values.source_url)) errors.push(`第 ${rowIndex} 行的 source_url 必须是完整 HTTP(S) URL`)
   errors.push(...validateDates(Object.fromEntries(Object.keys(dateLabels).map(key => [key, values[key] || ''])) as Dates).map(error => `第 ${rowIndex} 行：${error}`))
   const tags = (values.tags || '').split(';').map(tag => tag.trim()).filter(Boolean)
   if (new Set(tags).size !== tags.length) errors.push(`第 ${rowIndex} 行包含重复标签`)
@@ -131,9 +151,50 @@ function startsSoon(event: EventRecord) {
   return effectiveStatus(event) === 'upcoming' && days !== null && days <= 7
 }
 
+function readEventCSV(text: string) {
+  const imported: EventRecord[] = [], errors: string[] = []
+  let rows: string[][]
+  try { rows = parseCSV(text.replace(/^\ufeff/, '')) } catch (error) {
+    return { imported, errors: [error instanceof Error ? error.message : 'CSV 格式错误'] }
+  }
+  const headers = rows[0]?.map(header => header.trim()) ?? []
+  const missing = CSV_HEADERS.filter(header => !headers.includes(header))
+  if (rows.length < 2) return { imported, errors: ['CSV 文件没有可导入的数据'] }
+  if (missing.length) return { imported, errors: [`缺少字段：${missing.join('、')}`] }
+  if (headers.length !== CSV_HEADERS.length) return { imported, errors: ['CSV 必须包含 18 个不重复的规定表头，不可添加额外列'] }
+  const seenIds = new Set<string>(), seenUrls = new Set<string>()
+  rows.slice(1).forEach((row, index) => {
+    if (row.length !== headers.length) {
+      errors.push(`第 ${index + 2} 条记录应有 ${headers.length} 列，实际有 ${row.length} 列`)
+      return
+    }
+    const values = Object.fromEntries(headers.map((header, i) => [header, (row[i] || '').trim()]))
+    const result = normalizeRecord(values, index + 2)
+    if (result.record) {
+      if (seenIds.has(result.record.id)) errors.push(`第 ${index + 2} 行重复 id：${result.record.id}`)
+      if (result.record.source_url && seenUrls.has(result.record.source_url)) errors.push(`第 ${index + 2} 行重复 source_url`)
+      seenIds.add(result.record.id); if (result.record.source_url) seenUrls.add(result.record.source_url); imported.push(result.record)
+    }
+    errors.push(...result.errors)
+  })
+  return { imported, errors }
+}
+
+function initialEvents() {
+  const { imported, errors } = readEventCSV(sharedInitialCSV)
+  return errors.length ? starterEvents : imported
+}
+
 function App() {
   const [events, setEvents] = useState<EventRecord[]>(() => {
-    try { const saved = localStorage.getItem('campus-events'); return saved ? JSON.parse(saved) : starterEvents } catch { return starterEvents }
+    try {
+      const saved = localStorage.getItem('campus-events')
+      if (saved !== null) {
+        const records = JSON.parse(saved)
+        if (Array.isArray(records)) return records as EventRecord[]
+      }
+    } catch { /* Fall back when no readable list is available. */ }
+    return initialEvents()
   })
   const [filters, setFilters] = useState<Filters>({ query: '', tag: 'all', category: 'all', decision: 'all', status: 'all', view: 'all' })
   const [selectedId, setSelectedId] = useState<string | null>(null)
@@ -176,22 +237,7 @@ function App() {
   const importCSV = (file: File) => {
     const reader = new FileReader()
     reader.onload = () => {
-      const rows = parseCSV(String(reader.result || '').replace(/^\ufeff/, ''))
-      if (rows.length < 2) { setValidationErrors(['CSV 文件没有可导入的数据']); return }
-      const headers = rows[0].map(header => header.trim())
-      const missing = CSV_HEADERS.filter(header => !headers.includes(header))
-      if (missing.length) { setValidationErrors([`缺少字段：${missing.join('、')}`]); return }
-      const seenIds = new Set<string>(), seenUrls = new Set<string>(), imported: EventRecord[] = [], errors: string[] = []
-      rows.slice(1).forEach((row, index) => {
-        const values = Object.fromEntries(headers.map((header, i) => [header, (row[i] || '').trim()]))
-        const result = normalizeRecord(values, index + 2)
-        if (result.record) {
-          if (seenIds.has(result.record.id)) errors.push(`第 ${index + 2} 行重复 id：${result.record.id}`)
-          if (result.record.source_url && seenUrls.has(result.record.source_url)) errors.push(`第 ${index + 2} 行重复 source_url`)
-          seenIds.add(result.record.id); if (result.record.source_url) seenUrls.add(result.record.source_url); imported.push(result.record)
-        }
-        errors.push(...result.errors)
-      })
+      const { imported, errors } = readEventCSV(String(reader.result || ''))
       if (errors.length) { setValidationErrors(errors); setImportMessage('导入未完成，请先修正 CSV'); return }
       setEvents(imported.map(record => { const old = events.find(event => event.id === record.id); return old ? { ...record, starred: old.starred } : record }))
       setValidationErrors([]); setImportMessage(`已导入 ${imported.length} 条活动`)
@@ -283,7 +329,7 @@ function DetailPanel({ event, onClose, onUpdate, onDelete }: { event: EventRecor
   const [draftTags, setDraftTags] = useState(event.tags.join(';'))
   useEffect(() => setDraftTags(event.tags.join(';')), [event.id])
   const saveTags = () => onUpdate({ tags: Array.from(new Set(draftTags.split(';').map(tag => tag.trim()).filter(Boolean))) })
-  return <div className="drawer-backdrop" onClick={onClose}><aside className="detail-panel" onClick={event => event.stopPropagation()}><div className="detail-header"><div><span className="eyebrow">活动详情</span><h2>{event.title}</h2></div><button className="close-button" onClick={onClose}>×</button></div><div className="detail-scroll"><RegistrationDates event={event} /><DateEditor event={event} onUpdate={onUpdate} /><label className="field-label">参加意向<div className="decision-select">{(['yes', 'maybe', 'no'] as Decision[]).map(decision => <button key={decision} className={event.participation_decision === decision ? `selected ${decision}` : ''} onClick={() => onUpdate({ participation_decision: decision })}>{decisionLabels[decision]}</button>)}</div></label><label className="field-label">状态设置<select value={event.status} onChange={e => onUpdate({ status: e.target.value as EventStatus })}><option value="open">按日期自动判断</option><option value="closed">手动标记报名结束</option><option value="ended">手动标记已结束</option></select><span className="field-hint">当前：{statusLabels[effectiveStatus(event)]}；手动结束优先于日期判断。</span></label><div className="detail-grid"><Info label="主办方" value={event.organizer} /><Info label="活动日期" value={`${formatDate(event.event_start)}${event.event_end ? ` — ${formatDate(event.event_end)}` : ''}`} /><Info label="活动地点" value={event.location} /><Info label="适合人群" value={event.eligibility} /></div><label className="field-label">标签<span className="field-hint">使用分号分隔，例如：人工智能;校级</span><input value={draftTags} onChange={e => setDraftTags(e.target.value)} onBlur={saveTags} /></label><div className="detail-description"><span className="field-label">活动简介</span><p>{event.description || '暂无简介，可以在 CSV 中补充。'}</p></div><label className="field-label">我的备注<textarea value={event.notes} placeholder="记录报名材料、组队情况或你的下一步行动" onChange={e => onUpdate({ notes: e.target.value })} /></label>{event.source_url && <a className="source-link" href={event.source_url} target="_blank" rel="noreferrer">打开活动来源 ↗</a>}<div className="detail-footer"><button className="delete-button" onClick={onDelete}>删除活动</button><span>日期请点击保存，其余修改自动保存</span></div></div></aside></div>
+  return <div className="drawer-backdrop" onClick={onClose}><aside className="detail-panel" onClick={event => event.stopPropagation()}><div className="detail-header"><div><span className="eyebrow">活动详情</span><h2>{event.title}</h2></div><button className="close-button" onClick={onClose}>×</button></div><div className="detail-scroll"><RegistrationDates event={event} /><DateEditor event={event} onUpdate={onUpdate} /><label className="field-label">参加意向<div className="decision-select">{(['yes', 'maybe', 'no'] as Decision[]).map(decision => <button key={decision} className={event.participation_decision === decision ? `selected ${decision}` : ''} onClick={() => onUpdate({ participation_decision: decision })}>{decisionLabels[decision]}</button>)}</div></label><label className="field-label">状态设置<select value={event.status} onChange={e => onUpdate({ status: e.target.value as EventStatus })}><option value="open">按日期自动判断</option><option value="closed">手动标记报名结束</option><option value="ended">手动标记已结束</option></select><span className="field-hint">当前：{statusLabels[effectiveStatus(event)]}；手动结束优先于日期判断。</span></label><div className="detail-grid"><Info label="主办方" value={event.organizer} /><Info label="活动日期" value={`${formatDate(event.event_start)}${event.event_end ? ` — ${formatDate(event.event_end)}` : ''}`} /><Info label="活动地点" value={event.location} /><Info label="适合人群" value={event.eligibility} /></div><label className="field-label">标签<span className="field-hint">使用分号分隔，例如：人工智能;校级</span><input value={draftTags} onChange={e => setDraftTags(e.target.value)} onBlur={saveTags} /></label><div className="detail-description"><span className="field-label">活动简介</span><p>{event.description || '暂无简介，可以在 CSV 中补充。'}</p></div><label className="field-label">我的备注<textarea value={event.notes} placeholder="记录报名材料、组队情况或你的下一步行动" onChange={e => onUpdate({ notes: e.target.value })} /></label>{eventSources(event).map((url, index) => <div key={url}><a className="source-link" href={url} target="_blank" rel="noreferrer">{index === 0 ? "打开活动来源" : "打开补充来源 " + index} ↗</a></div>)}<div className="detail-footer"><button className="delete-button" onClick={onDelete}>删除活动</button><span>日期请点击保存，其余修改自动保存</span></div></div></aside></div>
 }
 function Info({ label, value }: { label: string, value: string }) { return <div className="info-block"><span>{label}</span><strong>{value || '未填写'}</strong></div> }
 
