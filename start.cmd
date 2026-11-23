@@ -1,7 +1,16 @@
 @echo off
 setlocal
 cd /d "%~dp0"
-set "PATH=C:\Users\2007\.cache\codex-runtimes\codex-primary-runtime\dependencies\node\bin;%PATH%"
-echo Campus Events: http://127.0.0.1:5174/
-call "C:\Users\2007\.cache\codex-runtimes\codex-primary-runtime\dependencies\bin\fallback\pnpm.cmd" dev
-pause
+where pnpm >nul 2>&1
+if errorlevel 1 (
+  echo Install pnpm and reopen this window.
+  pause
+  exit /b 1
+)
+if not exist "node_modules\vite\bin\vite.js" (
+  echo Run pnpm install --frozen-lockfile in this folder first.
+  pause
+  exit /b 1
+)
+call pnpm dev
+if errorlevel 1 pause

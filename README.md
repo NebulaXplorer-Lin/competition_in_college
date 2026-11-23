@@ -1,10 +1,8 @@
 # 竞赛雷达：架构、文件与使用说明
 
-更新日期：2026-10-04。本文以当前源码为准。
+更新日期：2026-11-23。本文以当前源码为准。
 
 日常收集比赛、使用 Codex 订阅额度和生成 CSV，请看 [比赛收集工作流使用指南](docs/campus-event-workflow-guide.md)。
-
-项目目录：`D:\Study250711\coding_projects\campus_competetion`。
 
 ## 1. 项目定位
 
@@ -12,7 +10,7 @@
 
 目前是纯前端单页应用，没有登录、业务后端、云数据库、自动抓取或内置 AI。主要通过 CSV 维护信息。关闭网页后不会运行截止提醒，也没有邮件、微信或浏览器通知。
 
-首次打开包含六条演示活动，日期随初始化时间生成，来源为示例链接，不能当作真实比赛通知。
+首次打开会加载 [中南大学竞赛共享清单](data/csu-competitions-2026.csv)。清单采用 2026 年 11 月 13 日修正版，覆盖参考目录 137 项，共 155 条记录。带有「2025参考」或「未找到信息」标签的条目请按备注理解。报名以赛事和学校最新通知为准。同一浏览器已有活动时，网页继续使用已保存的清单。
 
 ## 2. 架构与数据流
 
@@ -80,7 +78,8 @@ React 的 events 活动数组
 | `vite.config.ts` | Vite 配置，目前启用 React 插件 |
 | `tsconfig.json` | 前端 TypeScript 配置：严格检查、ES2021、React JSX |
 | `tsconfig.node.json` | Vite 配置文件的 TypeScript 构建配置 |
-| `start.cmd` | 当前电脑的双击启动入口 |
+| `start.cmd` | Windows 双击启动入口，需要先安装依赖 |
+| `data/csu-competitions-2026.csv` | 随项目提供的初始竞赛清单，可单独下载并手动导入 |
 | `.gitignore` | 排除依赖、构建产物、日志等文件 |
 | `README.md` | 本文档 |
 | `docs/campus-event-workflow-guide.md` | 比赛收集、确认、订阅额度和 CSV 工具的使用指南 |
@@ -92,7 +91,7 @@ React 的 events 活动数组
 | `dist/` | 生产构建产物，不手改，重新构建生成 |
 | `*.tsbuildinfo` | TypeScript 增量构建缓存 |
 | `vite.config.js`、`vite.config.d.ts` | 当前构建配置生成的文件；主要编辑 `.ts` 源文件 |
-| `node_modules.copied-backup/` | 迁移时保留的旧依赖副本，不参与运行；当前 `.gitignore` 尚未排除此目录，提交代码时不要加入 |
+| `node_modules.copied-backup/` | 迁移时保留的旧依赖副本，不参与运行 |
 
 ### main.tsx 内部结构
 
@@ -112,18 +111,17 @@ React 的 events 活动数组
 
 ### 日常启动
 
-1. 进入项目目录，双击 `start.cmd`。
+1. 完成下方的首次依赖安装后，进入项目目录，双击 `start.cmd`，或在终端执行 `pnpm dev`。
 2. 保持终端开启，访问 [竞赛雷达](http://127.0.0.1:5174/)。脚本本身不会自动打开浏览器。
 3. 使用结束后按 `Ctrl+C` 停止服务。停止服务不会主动清除本地活动。
 
 服务绑定 `127.0.0.1:5174`，仅在本机访问。端口被占用时会报错，不会自动切换端口。
 
-`start.cmd` 使用本电脑 `C:\Users\2007\.cache\codex-runtimes\...` 内的 Node.js 和 pnpm。换电脑后该路径可能不存在，需要配置 Node.js、pnpm 或调整脚本。
+### 首次安装
 
-### 已配置 Node.js 和 pnpm 的环境
+安装 Node.js 24 和 pnpm 后，在包含 `package.json` 的项目目录打开终端：
 
 ```powershell
-cd D:\Study250711\coding_projects\campus_competetion
 pnpm install --frozen-lockfile
 pnpm dev
 ```
